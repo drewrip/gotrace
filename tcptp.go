@@ -1,9 +1,11 @@
 package main
 
 import(
-	//"fmt"
+	"fmt"
 	"time"
 	"log"
+	"bytes"
+	"encoding/binary"
 	bpf "github.com/iovisor/gobpf/bcc"
 )
 
@@ -15,10 +17,11 @@ import "C"
 
 // This is the C code compiled by bcc to generate the bpf bytecode
 const source string = `
+#include <uapi/linux/ptrace.h>
+
 typedef struct {
-    u64 __unused__;
-    u8 saddr;
-    u32 daddr;
+    unsigned __int128 saddr;
+    unsigned __int128 daddr;
     u16 sport;
     u16 dport;
     u32 mark;
@@ -33,15 +36,32 @@ typedef struct {
     u64 sock_cookie;
 } tcp_probe_t;
 
-BPF_HASH(tcpinfo, u64, tcp_probe_t);
+typedef struct {
+    u16 data_len;
+    u16 sport;
+    u16 dport;
+    u32 mark;
+} tcp_data;
+
+BPF_HASH(tcpinfo, u64, tcp_data);
 
 int tcptp(tcp_probe_t *args) {
     u64 pid = bpf_get_current_pid_tgid();
-    tcp_probe_t ctcpi = *args; 
-    tcpinfo.update(&pid, &ctcpi);
+    tcp_data dat = {};
+    dat.data_len = args->data_len;
+    dat.sport = args->sport;
+    dat.dport = args->dport;
+    dat.mark = args->mark;
+    tcpinfo.update(&pid, &dat);
     return 0;
 };
 `
+type tcpInfo struct {
+	Datalen uint16
+	Sport uint16
+	Dport uint16
+	Mark uint32
+}
 
 func check(err error){
 	if err != nil{
@@ -60,17 +80,12 @@ func main(){
 	check(err)
 	
 	table := bpf.NewTable(m.TableId("tcpinfo"), m) 
-
-	recv := make(chan []byte)
-
-	perfMap, err := bpf.InitPerfMap(table, recv)
-	check(err)
-	/*
-	for{
-		in := <-
+	time.Sleep(5 * time.Second)
+	var dat tcpInfo
+	for it := table.Iter(); it.Next(); {
+		err := binary.Read(bytes.NewBuffer(it.Leaf()), binary.LittleEndian, &dat)
+		check(err)
+		k := binary.LittleEndian.Uint16(it.Key())
+		fmt.Printf("[PID] %d: %v\n", k, dat)
 	}
-        */
-	perfMap.Start()
-	time.Sleep(10 * time.Second)
-	perfMap.Stop()
 }
